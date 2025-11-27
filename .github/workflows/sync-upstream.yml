@@ -1,0 +1,64 @@
+name: Sync upstream and remove LFS
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # 每天 UTC 8:00（北京时间 16:00）自动同步
+  workflow_dispatch:      # 支持手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync from upstream
+        run: |
+          # 添加上游仓库
+          git remote add upstream https://github.com/xiamuceer-j/MuMuAINovel.git
+          
+          # 获取上游代码（跳过 LFS）
+          GIT_LFS_SKIP_SMUDGE=1 git fetch upstream main
+          
+          # 尝试合并上游更新
+          if git merge upstream/main --no-edit; then
+            echo "合并成功"
+          else
+            echo "合并有冲突，尝试自动解决..."
+            # 对于 .gitattributes 冲突，使用我们的版本
+            git checkout --ours .gitattributes 2>/dev/null || true
+            git add .gitattributes 2>/dev/null || true
+            git commit -m "Resolve merge conflicts" || true
+          fi
+
+      - name: Remove LFS configuration
+        run: |
+          # 移除 LFS 配置，让模型在运行时自动下载
+          echo "# 模型文件将在运行时自动从 Hugging Face 下载，不使用 Git LFS" > .gitattributes
+          
+          # 确保 embedding 模型目录被忽略
+          if ! grep -q "paraphrase-multilingual-MiniLM-L12-v2" .gitignore; then
+            echo "backend/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/" >> .gitignore
+          fi
+          
+          # 如果有 LFS 文件被追踪，移除它们
+          git rm -r --cached backend/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/ 2>/dev/null || true
+
+      - name: Commit and push
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有需要提交的更改"
+          else
+            git commit -m "🔄 同步上游更新，移除 LFS 依赖"
+            git push
+          fi

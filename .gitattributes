@@ -1,1 +1,1 @@
-*.safetensors filter=lfs diff=lfs merge=lfs -text
+# 模型文件将在运行时自动从 Hugging Face 下载，不使用 Git LFS
