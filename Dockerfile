@@ -55,10 +55,6 @@ COPY --from=frontend-builder /frontend/dist ./static
 # 创建必要的目录
 RUN mkdir -p /app/data /app/logs /app/embedding
 
-# 复制预下载的Embedding模型到独立目录（避免被docker-compose的data挂载覆盖）
-# 这样可以避免首次运行时联网下载约420MB的模型文件
-COPY backend/embedding /app/embedding
-
 # 暴露端口
 EXPOSE 8000
 
@@ -67,10 +63,7 @@ ENV PYTHONUNBUFFERED=1
 ENV APP_HOST=0.0.0.0
 ENV APP_PORT=8000
 
-# 设置Transformers和Sentence-Transformers离线模式
-ENV TRANSFORMERS_OFFLINE=1
-ENV HF_DATASETS_OFFLINE=1
-ENV HF_HUB_OFFLINE=1
+# Embedding模型将在首次运行时自动从 Hugging Face 下载
 ENV SENTENCE_TRANSFORMERS_HOME=/app/embedding
 
 # 健康检查
