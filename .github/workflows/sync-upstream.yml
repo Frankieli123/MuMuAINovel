@@ -40,7 +40,7 @@ jobs:
             git commit -m "Resolve merge conflicts" || true
           fi
 
-      - name: Remove LFS configuration
+      - name: Remove LFS and fix Dockerfile
         run: |
           # 移除 LFS 配置，让模型在运行时自动下载
           echo "# 模型文件将在运行时自动从 Hugging Face 下载，不使用 Git LFS" > .gitattributes
@@ -52,6 +52,21 @@ jobs:
           
           # 如果有 LFS 文件被追踪，移除它们
           git rm -r --cached backend/embedding/models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2/ 2>/dev/null || true
+          
+          # 修改 Dockerfile：移除 COPY embedding 和离线模式设置
+          if [ -f Dockerfile ]; then
+            # 删除 COPY backend/embedding 那行
+            sed -i '/COPY backend\/embedding/d' Dockerfile
+            
+            # 删除相关注释行
+            sed -i '/复制预下载的Embedding模型/d' Dockerfile
+            sed -i '/避免首次运行时联网下载/d' Dockerfile
+            
+            # 移除离线模式环境变量（让应用可以在线下载模型）
+            sed -i '/TRANSFORMERS_OFFLINE/d' Dockerfile
+            sed -i '/HF_DATASETS_OFFLINE/d' Dockerfile
+            sed -i '/HF_HUB_OFFLINE/d' Dockerfile
+          fi
 
       - name: Commit and push
         run: |
