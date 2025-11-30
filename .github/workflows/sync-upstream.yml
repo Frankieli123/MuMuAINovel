@@ -37,7 +37,28 @@ jobs:
             # 对于 .gitattributes 冲突，使用我们的版本
             git checkout --ours .gitattributes 2>/dev/null || true
             git add .gitattributes 2>/dev/null || true
-            git commit -m "Resolve merge conflicts" || true
+            
+            # 对于 Dockerfile 冲突，清理冲突标记
+            if [ -f Dockerfile ] && grep -q "<<<<<<< HEAD" Dockerfile; then
+              echo "修复 Dockerfile 冲突..."
+              # 移除冲突标记，保留需要 /app/embedding 目录的版本
+              sed -i '/<<<<<<< HEAD/d' Dockerfile
+              sed -i '/=======/d' Dockerfile
+              sed -i '/>>>>>>> upstream\/main/d' Dockerfile
+              # 确保 mkdir 包含 embedding 目录
+              sed -i 's|RUN mkdir -p /app/data /app/logs$|RUN mkdir -p /app/data /app/logs /app/embedding|g' Dockerfile
+              git add Dockerfile
+            fi
+            
+            # 处理其他可能的冲突文件
+            git diff --name-only --diff-filter=U | while read file; do
+              if [ -f "$file" ]; then
+                git checkout --ours "$file" 2>/dev/null || true
+                git add "$file" 2>/dev/null || true
+              fi
+            done
+            
+            git commit -m "Resolve merge conflicts (auto)" || true
           fi
 
       - name: Remove LFS and fix Dockerfile
