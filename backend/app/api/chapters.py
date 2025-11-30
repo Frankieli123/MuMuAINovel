@@ -37,7 +37,7 @@ from app.schemas.regeneration import (
     RegenerationTaskStatus
 )
 from app.services.ai_service import AIService
-from app.services.prompt_service import prompt_service
+from app.services.prompt_service import prompt_service, PromptService, WritingStyleManager
 from app.services.plot_analyzer import PlotAnalyzer
 from app.services.memory_service import memory_service
 from app.services.chapter_regenerator import ChapterRegenerator
@@ -444,6 +444,7 @@ async def build_smart_chapter_context(
             .where(Chapter.content != "")
             .order_by(Chapter.chapter_number)
         )
+
         all_chapters_info = all_chapters_result.all()
         total_previous = len(all_chapters_info)
         
@@ -1054,10 +1055,10 @@ async def generate_chapter_content_stream(
                     )
                     style = style_result.scalar_one_or_none()
                     if style:
-                        # 验证风格是否可用：全局预设风格（project_id为NULL）或者当前项目的自定义风格
-                        if style.project_id is None or style.project_id == current_chapter.project_id:
+                        # 验证风格是否可用：全局预设风格（user_id为NULL）或者当前用户的自定义风格
+                        if style.user_id is None or style.user_id == current_user_id:
                             style_content = style.prompt_content or ""
-                            style_type = "全局预设" if style.project_id is None else "项目自定义"
+                            style_type = "全局预设" if style.user_id is None else "用户自定义"
                             logger.info(f"使用指定风格: {style.name} ({style_type})")
                         else:
                             logger.warning(f"风格 {style_id} 不属于当前项目，无法使用")
@@ -1235,9 +1236,11 @@ async def generate_chapter_content_stream(
                         chapter_outline_content = outline.content if outline else current_chapter.summary or '暂无大纲'
                         logger.warning(f"⚠️ 一对多模式但无expansion_plan，使用大纲内容")
                 
-                # 根据是否有前置内容选择不同的提示词，并应用写作风格、记忆增强和MCP参考资料
+                # 根据是否有前置内容选择不同的提示词，并应用写作风格、记忆增强和MCP参考资料（支持自定义）
                 if previous_content:
-                    prompt = prompt_service.get_chapter_generation_with_context_prompt(
+                    template = await PromptService.get_template("CHAPTER_GENERATION_WITH_CONTEXT", current_user_id, db_session)
+                    base_prompt = PromptService.format_prompt(
+                        template,
                         title=project.title,
                         theme=project.theme or '',
                         genre=project.genre or '',
@@ -1252,14 +1255,25 @@ async def generate_chapter_content_stream(
                         chapter_number=current_chapter.chapter_number,
                         chapter_title=current_chapter.title,
                         chapter_outline=chapter_outline_content,
-                        style_content=style_content,
                         target_word_count=target_word_count,
-                        memory_context=memory_context,
-                        mcp_references=mcp_reference_materials,
-                        outline_mode=outline_mode
+                        max_word_count=target_word_count + 1000,
+                        memory_context=memory_context.get('recent_context', '') + "\n" + memory_context.get('relevant_memories', '') + "\n" + memory_context.get('foreshadows', '') + "\n" + memory_context.get('character_states', '') + "\n" + memory_context.get('plot_points', '') if memory_context else "暂无相关记忆"
                     )
+                    # 插入模式说明和MCP参考
+                    mode_instruction = "\n\n【创作模式说明】\n本章采用细纲模式：本章是大纲节点的细化展开之一。请严格遵循上述详细规划（expansion_plan）中的剧情点、角色焦点、情感基调和叙事目标，确保与整体规划保持一致，同时自然衔接前文内容。\n" if outline_mode == 'one-to-many' else "\n\n【创作模式说明】\n本章采用一对一模式：一个大纲节点对应一个章节。请在承接前文的基础上，充分展开大纲中的情节，保持叙事的完整性。\n"
+                    mcp_text = ""
+                    if mcp_reference_materials:
+                        mcp_text = "\n【📚 MCP工具搜索 - 参考资料】\n以下是通过MCP工具搜索到的相关参考资料，可用于丰富情节和细节：\n\n" + mcp_reference_materials + "\n"
+                    base_prompt = base_prompt.replace("本章信息：", mcp_text + mode_instruction + "\n本章信息：")
+                    # 应用写作风格
+                    if style_content:
+                        prompt = WritingStyleManager.apply_style_to_prompt(base_prompt, style_content)
+                    else:
+                        prompt = base_prompt
                 else:
-                    prompt = prompt_service.get_chapter_generation_prompt(
+                    template = await PromptService.get_template("CHAPTER_GENERATION", current_user_id, db_session)
+                    base_prompt = PromptService.format_prompt(
+                        template,
                         title=project.title,
                         theme=project.theme or '',
                         genre=project.genre or '',
@@ -1273,12 +1287,23 @@ async def generate_chapter_content_stream(
                         chapter_number=current_chapter.chapter_number,
                         chapter_title=current_chapter.title,
                         chapter_outline=chapter_outline_content,
-                        style_content=style_content,
                         target_word_count=target_word_count,
-                        memory_context=memory_context,
-                        mcp_references=mcp_reference_materials,
-                        outline_mode=outline_mode
+                        max_word_count=target_word_count + 1000
                     )
+                    # 插入模式说明和记忆、MCP参考
+                    mode_instruction = "\n\n【创作模式说明】\n本章采用细纲模式：本章是大纲节点的细化展开之一。请严格遵循上述详细规划中的剧情点、角色焦点和情感基调，确保与整体规划保持一致。\n" if outline_mode == 'one-to-many' else "\n\n【创作模式说明】\n本章采用一对一模式：一个大纲节点对应一个章节。请充分展开大纲中的情节，注重叙事的完整性和丰满度。\n"
+                    memory_text = ""
+                    if memory_context:
+                        memory_text = "\n【🧠 智能记忆系统 - 重要参考】\n" + memory_context.get('recent_context', '') + "\n" + memory_context.get('relevant_memories', '') + "\n" + memory_context.get('foreshadows', '') + "\n" + memory_context.get('character_states', '') + "\n" + memory_context.get('plot_points', '')
+                    mcp_text = ""
+                    if mcp_reference_materials:
+                        mcp_text = "\n【📚 MCP工具搜索 - 参考资料】\n以下是通过MCP工具搜索到的相关参考资料，可用于丰富情节和细节：\n\n" + mcp_reference_materials + "\n"
+                    base_prompt = base_prompt.replace("本章信息：", memory_text + mcp_text + mode_instruction + "\n\n本章信息：")
+                    # 应用写作风格
+                    if style_content:
+                        prompt = WritingStyleManager.apply_style_to_prompt(base_prompt, style_content)
+                    else:
+                        prompt = base_prompt
                 
                 if mcp_reference_materials:
                     logger.info(f"📖 已整合MCP参考资料（{len(mcp_reference_materials)}字符）到章节生成提示词")
@@ -2338,7 +2363,7 @@ async def generate_single_chapter_for_batch(
         )
         style = style_result.scalar_one_or_none()
         if style:
-            if style.project_id is None or style.project_id == chapter.project_id:
+            if style.user_id is None or style.user_id == user_id:
                 style_content = style.prompt_content or ""
     
     # 构建智能上下文
@@ -2411,9 +2436,12 @@ async def generate_single_chapter_for_batch(
             chapter_outline_content = outline.content if outline else chapter.summary or '暂无大纲'
             logger.warning(f"⚠️ 批量生成 - 一对多模式但无expansion_plan，使用大纲内容")
     
-    # 生成提示词
+    # 生成提示词（支持自定义）
     if previous_content:
-        prompt = prompt_service.get_chapter_generation_with_context_prompt(
+        # 获取自定义提示词模板
+        template = await PromptService.get_template("CHAPTER_GENERATION_WITH_CONTEXT", user_id, db_session)
+        base_prompt = PromptService.format_prompt(
+            template,
             title=project.title,
             theme=project.theme or '',
             genre=project.genre or '',
@@ -2428,13 +2456,20 @@ async def generate_single_chapter_for_batch(
             chapter_number=chapter.chapter_number,
             chapter_title=chapter.title,
             chapter_outline=chapter_outline_content,
-            style_content=style_content,
             target_word_count=target_word_count,
-            memory_context=memory_context,
-            outline_mode=outline_mode
+            max_word_count=target_word_count + 1000,
+            memory_context=memory_context.get('recent_context', '') + "\n" + memory_context.get('relevant_memories', '') + "\n" + memory_context.get('foreshadows', '') + "\n" + memory_context.get('character_states', '') + "\n" + memory_context.get('plot_points', '') if memory_context else "暂无相关记忆"
         )
+        # 应用写作风格
+        if style_content:
+            prompt = WritingStyleManager.apply_style_to_prompt(base_prompt, style_content)
+        else:
+            prompt = base_prompt
     else:
-        prompt = prompt_service.get_chapter_generation_prompt(
+        # 获取自定义提示词模板
+        template = await PromptService.get_template("CHAPTER_GENERATION", user_id, db_session)
+        base_prompt = PromptService.format_prompt(
+            template,
             title=project.title,
             theme=project.theme or '',
             genre=project.genre or '',
@@ -2448,11 +2483,14 @@ async def generate_single_chapter_for_batch(
             chapter_number=chapter.chapter_number,
             chapter_title=chapter.title,
             chapter_outline=chapter_outline_content,
-            style_content=style_content,
             target_word_count=target_word_count,
-            memory_context=memory_context,
-            outline_mode=outline_mode
+            max_word_count=target_word_count + 1000
         )
+        # 应用写作风格
+        if style_content:
+            prompt = WritingStyleManager.apply_style_to_prompt(base_prompt, style_content)
+        else:
+            prompt = base_prompt
     
     # 非流式生成内容
     full_content = ""
@@ -2543,7 +2581,7 @@ async def regenerate_chapter_stream(
         if not analysis:
             raise HTTPException(status_code=404, detail="该章节暂无分析结果")
     
-    # 预先获取项目上下文数据
+    # 预先获取项目上下文数据和写作风格
     async for temp_db in get_db(request):
         try:
             # 获取项目信息
@@ -2565,6 +2603,41 @@ async def regenerate_chapter_stream(
                 .where(Outline.order_index == chapter.chapter_number)
             )
             outline = outline_result.scalar_one_or_none()
+            
+            # 获取写作风格
+            style_content = ""
+            style_id = regenerate_request.style_id
+            
+            # 如果没有指定风格，尝试使用项目的默认风格
+            if not style_id:
+                from app.models.project_default_style import ProjectDefaultStyle
+                default_style_result = await temp_db.execute(
+                    select(ProjectDefaultStyle.style_id)
+                    .where(ProjectDefaultStyle.project_id == chapter.project_id)
+                )
+                default_style_id = default_style_result.scalar_one_or_none()
+                if default_style_id:
+                    style_id = default_style_id
+                    logger.info(f"📝 使用项目默认写作风格: {style_id}")
+            
+            # 获取风格内容
+            if style_id:
+                style_result = await temp_db.execute(
+                    select(WritingStyle).where(WritingStyle.id == style_id)
+                )
+                style = style_result.scalar_one_or_none()
+                if style:
+                    # 验证风格是否可用：全局预设风格（user_id为NULL）或者当前用户的自定义风格
+                    if style.user_id is None or style.user_id == user_id:
+                        style_content = style.prompt_content or ""
+                        style_type = "全局预设" if style.user_id is None else "用户自定义"
+                        logger.info(f"✅ 使用写作风格: {style.name} ({style_type})")
+                    else:
+                        logger.warning(f"⚠️ 风格 {style_id} 不属于当前项目，跳过")
+                else:
+                    logger.warning(f"⚠️ 未找到风格 {style_id}")
+            else:
+                logger.info("ℹ️ 未指定写作风格，使用默认提示词")
             
             # 构建项目上下文
             project_context = {
@@ -2635,7 +2708,10 @@ async def regenerate_chapter_stream(
                     chapter=chapter,
                     analysis=analysis,
                     regenerate_request=regenerate_request,
-                    project_context=project_context
+                    project_context=project_context,
+                    style_content=style_content,
+                    user_id=user_id,
+                    db=db_session
                 ):
                     # 处理不同类型的事件
                     if event['type'] == 'chunk':

@@ -46,14 +46,18 @@ RUN pip install --no-cache-dir torch==2.7.0 --index-url https://download.pytorch
 # 再安装其他Python依赖（使用阿里云镜像加速）
 RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 
-# 复制后端代码
+# 复制后端代码（包含embedding模型）
 COPY backend/ ./
 
 # 从前端构建阶段复制构建好的静态文件
 COPY --from=frontend-builder /frontend/dist ./static
 
 # 创建必要的目录
+<<<<<<< HEAD
 RUN mkdir -p /app/data /app/logs /app/embedding
+=======
+RUN mkdir -p /app/data /app/logs
+>>>>>>> upstream/main
 
 # 暴露端口
 EXPOSE 8000
