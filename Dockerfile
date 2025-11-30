@@ -53,11 +53,9 @@ COPY backend/ ./
 COPY --from=frontend-builder /frontend/dist ./static
 
 # 创建必要的目录
-<<<<<<< HEAD
+
 RUN mkdir -p /app/data /app/logs /app/embedding
-=======
-RUN mkdir -p /app/data /app/logs
->>>>>>> upstream/main
+
 
 # 暴露端口
 EXPOSE 8000
