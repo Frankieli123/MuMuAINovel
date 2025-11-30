@@ -1,7 +1,8 @@
 """章节重新生成服务"""
 from typing import Dict, Any, AsyncGenerator, Optional, List
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.ai_service import AIService
-from app.services.prompt_service import prompt_service
+from app.services.prompt_service import prompt_service, PromptService
 from app.models.chapter import Chapter
 from app.models.memory import PlotAnalysis
 from app.schemas.regeneration import ChapterRegenerateRequest, PreserveElementsConfig
@@ -23,7 +24,10 @@ class ChapterRegenerator:
         chapter: Chapter,
         analysis: Optional[PlotAnalysis],
         regenerate_request: ChapterRegenerateRequest,
-        project_context: Dict[str, Any]
+        project_context: Dict[str, Any],
+        style_content: str = "",
+        user_id: str = None,
+        db: AsyncSession = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         根据反馈重新生成章节（流式）
@@ -33,6 +37,9 @@ class ChapterRegenerator:
             analysis: 分析结果（可选）
             regenerate_request: 重新生成请求参数
             project_context: 项目上下文（项目信息、角色、大纲等）
+            style_content: 写作风格
+            user_id: 用户ID（用于获取自定义提示词）
+            db: 数据库会话（用于查询自定义提示词）
         
         Yields:
             包含类型和数据的字典: {'type': 'progress'/'chunk', 'data': ...}
@@ -51,13 +58,16 @@ class ChapterRegenerator:
             
             # 2. 构建完整提示词
             yield {'type': 'progress', 'progress': 10, 'message': '正在构建生成提示词...'}
-            full_prompt = self._build_regeneration_prompt(
+            full_prompt = await self._build_regeneration_prompt(
                 chapter=chapter,
                 modification_instructions=modification_instructions,
                 project_context=project_context,
-                regenerate_request=regenerate_request
+                regenerate_request=regenerate_request,
+                style_content=style_content,
+                user_id=user_id,
+                db=db
             )
-            
+
             logger.info(f"🎯 提示词构建完成，开始AI生成")
             yield {'type': 'progress', 'progress': 15, 'message': '开始AI生成内容...'}
             
@@ -156,113 +166,31 @@ class ChapterRegenerator:
         
         return "\n".join(instructions)
     
-    def _build_regeneration_prompt(
+    async def _build_regeneration_prompt(
         self,
         chapter: Chapter,
         modification_instructions: str,
         project_context: Dict[str, Any],
-        regenerate_request: ChapterRegenerateRequest
+        regenerate_request: ChapterRegenerateRequest,
+        style_content: str = "",
+        user_id: str = None,
+        db: AsyncSession = None
     ) -> str:
         """构建完整的重新生成提示词"""
-        
-        prompt_parts = []
-        
-        # 系统角色
-        prompt_parts.append("""你是一位经验丰富的专业小说编辑和作家。现在需要根据反馈意见重新创作一个章节。
-
-你的任务是：
-1. 仔细理解原章节的内容和意图
-2. 认真分析所有的修改要求
-3. 在保持故事连贯性的前提下，创作一个改进后的新版本
-4. 确保新版本在艺术性和可读性上都有明显提升
-
----
-""")
-        
-        # 原始章节信息
-        prompt_parts.append(f"""## 📖 原始章节信息
-
-**章节**：第{chapter.chapter_number}章
-**标题**：{chapter.title}
-**字数**：{chapter.word_count}字
-
-**原始内容**：
-{chapter.content}
-
----
-""")
-        
-        # 修改指令
-        prompt_parts.append(modification_instructions)
-        prompt_parts.append("\n---\n")
-        
-        # 项目背景信息
-        prompt_parts.append(f"""## 🌍 项目背景信息
-
-**小说标题**：{project_context.get('project_title', '未知')}
-**题材**：{project_context.get('genre', '未设定')}
-**主题**：{project_context.get('theme', '未设定')}
-**叙事视角**：{project_context.get('narrative_perspective', '第三人称')}
-**世界观设定**：
-- 时代背景：{project_context.get('time_period', '未设定')}
-- 地理位置：{project_context.get('location', '未设定')}
-- 氛围基调：{project_context.get('atmosphere', '未设定')}
-
----
-""")
-        
-        # 角色信息
-        if project_context.get('characters_info'):
-            prompt_parts.append(f"""## 👥 角色信息
-
-{project_context['characters_info']}
-
----
-""")
-        
-        # 章节大纲
-        if project_context.get('chapter_outline'):
-            prompt_parts.append(f"""## 📝 本章大纲
-
-{project_context['chapter_outline']}
-
----
-""")
-        
-        # 前置章节上下文
-        if project_context.get('previous_context'):
-            prompt_parts.append(f"""## 📚 前置章节上下文
-
-{project_context['previous_context']}
-
----
-""")
-        
-        # 创作要求
-        prompt_parts.append(f"""## ✨ 创作要求
-
-1. **解决问题**：针对上述修改指令中提到的所有问题进行改进
-2. **保持连贯**：确保与前后章节的情节、人物、风格保持一致
-3. **提升质量**：在节奏、情感、描写等方面明显优于原版
-4. **保留精华**：保持原章节中优秀的部分和关键情节
-5. **字数控制**：目标字数约{regenerate_request.target_word_count}字（可适当浮动±20%）
-
----
-
-## 🎬 开始创作
-
-请现在开始创作改进后的新版本章节内容。
-
-**重要提示**：
-- 直接输出章节正文内容，从故事内容开始写
-- **不要**输出章节标题（如"第X章"、"第X章：XXX"等）
-- **不要**输出任何额外的说明、注释或元数据
-- 只需要纯粹的故事正文内容
-
-现在开始：
-""")
-        
-        return "\n".join(prompt_parts)
+        # 使用PromptService的get_chapter_regeneration_prompt方法
+        # 该方法会处理自定义模板加载和完整提示词构建
+        return await PromptService.get_chapter_regeneration_prompt(
+            chapter_number=chapter.chapter_number,
+            title=chapter.title,
+            word_count=chapter.word_count,
+            content=chapter.content,
+            modification_instructions=modification_instructions,
+            project_context=project_context,
+            style_content=style_content,
+            target_word_count=regenerate_request.target_word_count,
+            user_id=user_id,
+            db=db
+        )
     
     def calculate_content_diff(
         self,
